@@ -1,0 +1,20 @@
+[
+  {
+    "query": "How do I create a virtual environment?",
+    "expected_urls": [
+      "https://docs.python.org/3.11/library/venv.html"
+    ]
+  },
+  {
+    "query": "How do I read environment variables in Python?",
+    "expected_urls": [
+      "https://docs.python.org/3.11/library/os.html"
+    ]
+  },
+  {
+    "query": "How do I work with pathlib paths?",
+    "expected_urls": [
+      "https://docs.python.org/3.11/library/pathlib.html"
+    ]
+  }
+]
