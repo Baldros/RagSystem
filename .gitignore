@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Virtual Environments
+.venv/
+
+# IDEs
+.vscode/
+
+# Testing
+.pytest_cache/
+.coverage
+
+# Logs
+*.log
+
+# Project Specific Data (ignora as pastas de dados)
+data/
+!data/.gitkeep
