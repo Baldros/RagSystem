@@ -1,0 +1,3 @@
+llama-index-core>=0.10.0
+llama-index-llms-ollama>=0.1.2
+# Não adicionamos llama-index-embeddings-ollama pois o retriever nativo usará o seu embedder atual

@@ -4,7 +4,7 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import parse_qs, urlparse, urlunparse
 
 
 DEFAULT_DATABASE_DSN = "postgresql://postgres:postgres@localhost:5432/rag_project"
@@ -39,12 +39,17 @@ class ProjectSettings:
 @dataclass(slots=True)
 class DiscoverySettings:
     allowed_domains: list[str]
+    allowed_path_prefixes: list[str]
     start_urls: list[str]
     sitemap_urls: list[str]
     toc_css_selectors: list[str]
     include_url_patterns: list[str]
     exclude_url_patterns: list[str]
     max_pages: int
+    max_depth: int
+    max_runtime_minutes: int
+    max_failures: int
+    max_total_bytes: int
 
 
 @dataclass(slots=True)
@@ -62,6 +67,7 @@ class ProcessingSettings:
     chunk_size: int
     chunk_overlap: int
     min_section_length: int
+    index_navigation_pages: bool
 
 
 @dataclass(slots=True)
@@ -100,14 +106,21 @@ def build_config(
     data_root: str | Path = "data",
     user_agent: str | None = None,
     max_pages: int = 300,
+    max_depth: int = 2,
+    max_runtime_minutes: int = 0,
+    max_failures: int = 0,
+    max_total_bytes: int = 0,
     max_workers: int = 4,
     request_timeout_seconds: int = 20,
     retry_attempts: int = 3,
     retry_backoff_seconds: float = 2.0,
     headless: bool = False,
+    include_patterns: list[str] | None = None,
+    exclude_patterns: list[str] | None = None,
     chunk_size: int = 1200,
     chunk_overlap: int = 150,
     min_section_length: int = 80,
+    index_navigation_pages: bool = False,
     embedding_provider: str = "sentence_transformer",
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2",
     embedding_dimension: int = 384,
@@ -125,20 +138,12 @@ def build_config(
     normalized_root_url = _normalize_root_url(root_url)
     collection_name = collection or derive_collection_name(normalized_root_url)
     
-    # Improved pattern matching for Ansys-style secured URLs
-    include_patterns = []
-    if "returnurl=" in root_url.lower():
-        # Extract the path from the returnurl parameter
-        from urllib.parse import parse_qs
-        params = parse_qs(parsed.query)
-        return_url = params.get("returnurl", [None])[0]
-        if return_url:
-            return_path = urlparse(return_url).path
-            # Use a broader pattern if it's a deep link
-            include_patterns.append("/".join(return_path.split("/")[:3]))
-    
-    if not include_patterns and parsed.path and parsed.path != "/":
-        include_patterns.append(parsed.path)
+    default_path_prefix = _derive_scope_prefix(root_url)
+    path_prefixes = [default_path_prefix] if default_path_prefix else []
+    configured_include_patterns = list(include_patterns or [])
+    configured_exclude_patterns = list(exclude_patterns or DEFAULT_EXCLUDE_PATTERNS)
+    if not configured_include_patterns and default_path_prefix and default_path_prefix != "/":
+        configured_include_patterns.append(default_path_prefix)
     
     collection_data_dir = Path(data_root) / collection_name
 
@@ -146,12 +151,17 @@ def build_config(
         project=ProjectSettings(collection=collection_name, data_dir=collection_data_dir),
         discovery=DiscoverySettings(
             allowed_domains=[parsed.netloc],
+            allowed_path_prefixes=path_prefixes,
             start_urls=[normalized_root_url],
             sitemap_urls=[],
             toc_css_selectors=list(DEFAULT_TOC_SELECTORS),
-            include_url_patterns=include_patterns,
-            exclude_url_patterns=list(DEFAULT_EXCLUDE_PATTERNS),
+            include_url_patterns=configured_include_patterns,
+            exclude_url_patterns=configured_exclude_patterns,
             max_pages=max_pages,
+            max_depth=max_depth,
+            max_runtime_minutes=max_runtime_minutes,
+            max_failures=max_failures,
+            max_total_bytes=max_total_bytes,
         ),
         fetching=FetchingSettings(
             user_agent=user_agent or os.getenv("RAG_USER_AGENT", DEFAULT_USER_AGENT),
@@ -165,6 +175,7 @@ def build_config(
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
             min_section_length=min_section_length,
+            index_navigation_pages=index_navigation_pages,
         ),
         embeddings=EmbeddingSettings(
             provider=embedding_provider,
@@ -201,3 +212,22 @@ def _normalize_root_url(root_url: str) -> str:
     if path.endswith("/"):
         return root_url
     return urlunparse(parsed._replace(path=f"{path}/"))
+
+
+def _derive_scope_prefix(root_url: str) -> str | None:
+    parsed = urlparse(root_url)
+    params = parse_qs(parsed.query)
+    return_url = params.get("returnurl", [None])[0]
+    candidate_path = urlparse(return_url).path if return_url else parsed.path
+    if not candidate_path:
+        return None
+
+    normalized = candidate_path.rstrip("/") or "/"
+    if normalized != "/":
+        last_segment = normalized.split("/")[-1]
+        if "." in last_segment:
+            normalized = normalized.rsplit("/", 1)[0] or "/"
+
+    if normalized != "/" and not normalized.startswith("/"):
+        normalized = f"/{normalized}"
+    return normalized

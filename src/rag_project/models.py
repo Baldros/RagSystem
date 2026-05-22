@@ -27,6 +27,26 @@ class UrlRecord:
 
 
 @dataclass(slots=True)
+class DiscoverySkip:
+    url: str
+    canonical_url: str
+    source: str
+    depth: int
+    reason: str
+    discovered_from: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class DiscoveryResult:
+    records: list[UrlRecord]
+    skipped: list[DiscoverySkip]
+    stopped_reason: str
+    total_bytes: int
+    failure_count: int
+
+
+@dataclass(slots=True)
 class DiscoveredNode:
     collection: str
     node_id: str

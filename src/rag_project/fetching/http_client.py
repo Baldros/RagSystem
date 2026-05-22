@@ -12,6 +12,7 @@ from selenium.webdriver.edge.options import Options
 from selenium.webdriver.edge.service import Service
 from selenium.webdriver.support.ui import WebDriverWait
 
+from rag_project.discovery.toc import extract_toc_entries as extract_toc_entries_from_html
 from rag_project.utils.url import absolutize
 
 
@@ -86,22 +87,43 @@ class HttpClient:
 
     def get(self, url: str, conditional_headers: dict | None = None) -> HttpResponse:
         del conditional_headers
-        if url in self._response_cache:
-            return self._response_cache[url]
+        cached = self._response_cache.get(url)
+        if cached is not None:
+            return cached
 
         driver = self._prepare_page(url)
-        response = HttpResponse(
+        response = self._build_response(driver)
+        self._cache_response(url, response)
+        return response
+
+    def extract_toc_entries(self, url: str, css_selectors: list[str]) -> list[dict]:
+        cached = self._response_cache.get(url)
+        if cached is not None:
+            return extract_toc_entries_from_html(
+                html=cached.text,
+                base_url=cached.url,
+                css_selectors=css_selectors,
+            )
+
+        driver = self._prepare_page(url)
+        # Cache the rendered snapshot discovered during TOC extraction so the
+        # processing stage can reuse it instead of navigating again.
+        response = self._build_response(driver)
+        self._cache_response(url, response)
+        return self._collect_toc_entries_from_dom(driver, css_selectors)
+
+    def _build_response(self, driver) -> HttpResponse:
+        return HttpResponse(
             url=driver.current_url,
             status_code=200,
             text=self._capture_rendered_html(driver),
             headers={},
         )
-        self._response_cache[url] = response
-        return response
 
-    def extract_toc_entries(self, url: str, css_selectors: list[str]) -> list[dict]:
-        driver = self._prepare_page(url)
-        return self._collect_toc_entries_from_dom(driver, css_selectors)
+    def _cache_response(self, requested_url: str, response: HttpResponse) -> None:
+        self._response_cache[requested_url] = response
+        if response.url not in self._response_cache:
+            self._response_cache[response.url] = response
 
     def _prepare_page(self, url: str):
         last_error: Exception | None = None

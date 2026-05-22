@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
 from collections import defaultdict
 from dataclasses import asdict
@@ -60,7 +61,7 @@ def initialize_database(config: AppConfig, sql_path: Path, *, debug: bool = True
         LOGGER.info("database schema ready")
 
 
-def crawl_to_filesystem(config: AppConfig, *, show_progress: bool = True, debug: bool = True) -> dict[str, int]:
+def crawl_to_filesystem(config: AppConfig, *, show_progress: bool = True, debug: bool = True) -> dict[str, object]:
     data_paths = build_data_paths(config.project.data_dir)
     http_client = HttpClient(
         user_agent=config.fetching.user_agent,
@@ -72,15 +73,35 @@ def crawl_to_filesystem(config: AppConfig, *, show_progress: bool = True, debug:
     if debug:
         LOGGER.info("[2/3] discovering documentation pages from %s", config.discovery.start_urls[0])
     discovery_service = DiscoveryService(config=config, http_client=http_client)
-    inventory = discovery_service.discover()
+    discovery_result = discovery_service.discover()
+    inventory = discovery_result.records
+    skipped_urls = discovery_result.skipped
     write_jsonl(data_paths.inventory_jsonl, [asdict(item) for item in inventory])
+    write_jsonl(data_paths.skipped_urls_jsonl, [asdict(item) for item in skipped_urls])
     discovered_nodes = _build_discovered_nodes(inventory)
     write_jsonl(data_paths.discovered_nodes_jsonl, [asdict(item) for item in discovered_nodes])
     write_json(data_paths.link_tree_json, _build_link_tree_payload(discovered_nodes))
+    write_json(
+        data_paths.discovery_report_json,
+        {
+            "stopped_reason": discovery_result.stopped_reason,
+            "discovered_url_count": len(inventory),
+            "skipped_url_count": len(skipped_urls),
+            "failure_count": discovery_result.failure_count,
+            "total_bytes": discovery_result.total_bytes,
+            "max_pages": config.discovery.max_pages,
+            "max_depth": config.discovery.max_depth,
+            "max_runtime_minutes": config.discovery.max_runtime_minutes,
+            "max_failures": config.discovery.max_failures,
+            "max_total_bytes": config.discovery.max_total_bytes,
+        },
+    )
     if debug:
         LOGGER.info(
-            "discovered %s candidate URLs for collection %s",
+            "discovered %s candidate URLs (%s skipped, stop=%s) for collection %s",
             len(inventory),
+            len(skipped_urls),
+            discovery_result.stopped_reason,
             config.project.collection,
         )
 
@@ -94,6 +115,7 @@ def crawl_to_filesystem(config: AppConfig, *, show_progress: bool = True, debug:
         chunker=chunker,
         min_section_length=config.processing.min_section_length,
         collection=config.project.collection,
+        index_navigation_pages=config.processing.index_navigation_pages,
     )
 
     documents: list[dict] = []
@@ -113,36 +135,69 @@ def crawl_to_filesystem(config: AppConfig, *, show_progress: bool = True, debug:
         )
         return asdict(raw_document), [asdict(item) for item in page_sections], [asdict(item) for item in page_chunks]
 
-    progress = tqdm(
-        inventory,
-        total=len(inventory),
-        desc="Processing pages",
-        disable=not show_progress,
-    )
     try:
-        for record in progress:
-            try:
-                raw_document, page_sections, page_chunks = process_record(record)
-            except Exception as exc:
-                failures += 1
-                LOGGER.warning("failed to process %s: %s", record.url, exc)
-                continue
-            documents.append(raw_document)
-            sections.extend(page_sections)
-            chunks.extend(page_chunks)
+        max_workers = max(1, config.fetching.max_workers)
+        if max_workers == 1:
+            progress = tqdm(
+                inventory,
+                total=len(inventory),
+                desc="Processing pages",
+                disable=not show_progress,
+            )
+            for record in progress:
+                try:
+                    raw_document, page_sections, page_chunks = process_record(record)
+                except Exception as exc:
+                    failures += 1
+                    LOGGER.warning("failed to process %s: %s", record.url, exc)
+                    continue
+                documents.append(raw_document)
+                sections.extend(page_sections)
+                chunks.extend(page_chunks)
+        else:
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_map = {executor.submit(process_record, record): record for record in inventory}
+                progress = tqdm(
+                    as_completed(future_map),
+                    total=len(future_map),
+                    desc="Processing pages",
+                    disable=not show_progress,
+                )
+                for future in progress:
+                    record = future_map[future]
+                    try:
+                        raw_document, page_sections, page_chunks = future.result()
+                    except Exception as exc:
+                        failures += 1
+                        LOGGER.warning("failed to process %s: %s", record.url, exc)
+                        continue
+                    documents.append(raw_document)
+                    sections.extend(page_sections)
+                    chunks.extend(page_chunks)
     finally:
         http_client.close()
+
+    documents.sort(key=lambda item: item["canonical_url"])
+    sections.sort(key=lambda item: (item["canonical_url"], item["order_in_page"], item["section_id"]))
+    chunks.sort(key=lambda item: (item["canonical_url"], item["section_id"], item["order_in_section"], item["chunk_id"]))
 
     write_jsonl(data_paths.raw_documents_jsonl, documents)
     write_jsonl(data_paths.sections_jsonl, sections)
     write_jsonl(data_paths.chunks_jsonl, chunks)
-    report = build_coverage_report(inventory=[asdict(item) for item in inventory], documents=documents)
+    report = build_coverage_report(
+        inventory=[asdict(item) for item in inventory],
+        documents=documents,
+        skipped=[asdict(item) for item in skipped_urls],
+        stopped_reason=discovery_result.stopped_reason,
+    )
     write_json(data_paths.coverage_report_json, report)
     if debug:
         LOGGER.info(
-            "crawl finished: %s nodes, %s documents, %s sections, %s chunks, %s failures, %.2f%% coverage",
+            "crawl finished: %s nodes, %s docs (%s content / %s nav), %s sections, %s chunks, %s failures, %.2f%% coverage",
             len(discovered_nodes),
             len(documents),
+            report["content_url_count"],
+            report["navigation_url_count"],
             len(sections),
             len(chunks),
             failures,
@@ -154,11 +209,14 @@ def crawl_to_filesystem(config: AppConfig, *, show_progress: bool = True, debug:
         "sections": len(sections),
         "chunks": len(chunks),
         "failures": failures,
+        "skipped_urls": len(skipped_urls),
+        "discovery_failures": discovery_result.failure_count,
+        "discovery_stop_reason": discovery_result.stopped_reason,
         "coverage_ratio": report["coverage_ratio"],
     }
 
 
-def index_filesystem_corpus(config: AppConfig, *, show_progress: bool = True, debug: bool = True) -> dict[str, int]:
+def index_filesystem_corpus(config: AppConfig, *, show_progress: bool = True, debug: bool = True) -> dict[str, object]:
     repository = RagRepository(Database(config.database_dsn))
     embedder = build_embedder(config.embeddings)
     paths = build_data_paths(config.project.data_dir)

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
+from urllib.parse import parse_qs, parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
 
 def absolutize(base_url: str, maybe_relative: str) -> str:
@@ -60,3 +60,12 @@ def canonicalize_url(url: str) -> str:
 def same_domain(url: str, allowed_domains: list[str]) -> bool:
     host = urlparse(url).netloc.lower()
     return any(host == domain.lower() or host.endswith(f".{domain.lower()}") for domain in allowed_domains)
+
+
+def extract_effective_path(url: str) -> str:
+    parsed = urlparse(url)
+    params = parse_qs(parsed.query)
+    return_url = params.get("returnurl", [None])[0]
+    if return_url:
+        return urlparse(return_url).path or "/"
+    return parsed.path or "/"

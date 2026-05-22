@@ -37,10 +37,17 @@ python scripts/build_vector_store.py --root-url "https://docs.python.org/3.11/"
 - `--root-url` (Obrigatório): Ponto inicial da documentação.
 - `--collection`: Nome lógico da coleção. Se omitido, o sistema gera um slug baseado na URL (ex: `docs-python-org-3-11`).
 - `--max-pages`: Limite de páginas a processar (default: 300).
+- `--max-depth`: Profundidade máxima de expansão de links de TOC (default: 2, negativo = ilimitado).
+- `--max-runtime-minutes`: Guard rail de tempo para interromper descoberta (0 desativa).
+- `--max-failures`: Guard rail de falhas acumuladas de fetch/TOC (0 desativa).
+- `--max-total-bytes`: Guard rail de volume total de HTML coletado (0 desativa).
+- `--max-workers`: Número de workers para processamento paralelo de páginas.
+- `--include-pattern` / `--exclude-pattern`: Ajustes explícitos de escopo de URL (aceitação/rejeição).
 - `--headless`: Executa o browser em modo invisível (default: False).
 - `--device`: Força o device de embeddings (`auto`, `cpu` ou `cuda`).
 - `--db-dsn`: String de conexão PostgreSQL (sobrescreve o default).
 - `--filesystem-only`: Gera artefatos locais em `data/` sem exigir banco de dados ou gerar embeddings.
+- `--index-navigation-pages`: Indexa páginas classificadas como navegação (por padrão elas são mantidas fora do índice de retrieval).
 
 **Feedback e Verbosidade:**
 
@@ -83,10 +90,12 @@ O sistema utiliza **PostgreSQL 16+** com a extensão `pgvector`. O schema é mul
 Mesmo indexando no banco, o sistema gera artefatos em `data/<collection>/` para auditoria:
 
 - `raw/inventory.jsonl`: Lista de URLs descobertas.
+- `raw/skipped_urls.jsonl`: URLs rejeitadas/não processadas com motivo objetivo (`outside_scope`, `duplicate`, `guard_rail_*`, etc.).
 - `raw/discovered_nodes.jsonl`: Árvore de navegação extraída.
 - `raw/documents.jsonl`: Conteúdo bruto extraído.
-- `processed/sections.jsonl` e `chunks.jsonl`: Dados estruturados.
-- `processed/coverage_report.json`: Resumo de sucesso/falha do crawl.
+- `processed/sections.jsonl` e `chunks.jsonl`: Dados estruturados (incluindo metadados hierárquicos e offsets de chunk).
+- `processed/discovery_report.json`: Resumo operacional da descoberta (motivo de parada, bytes, falhas, limites).
+- `processed/coverage_report.json`: Cobertura por descoberta/conteúdo/indexação + distribuição por profundidade/origem.
 
 ---
 
